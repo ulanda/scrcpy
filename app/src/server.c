@@ -60,6 +60,7 @@ static SDL_bool disable_tunnel_forward(const char *serial, Uint16 local_port) {
 }
 
 static SDL_bool enable_tunnel(struct server *server) {
+
     if (enable_tunnel_reverse(server->serial, server->local_port)) {
         return SDL_TRUE;
     }
@@ -99,10 +100,11 @@ static process_t execute_server(const char *serial,
     return adb_execute(serial, cmd, sizeof(cmd) / sizeof(cmd[0]));
 }
 
-#define IPV4_LOCALHOST 0x7F000001
+#define IPV4_LOCALHOST  0x7F000001
+#define	IPV4_INADDR_ANY	0x00000000
 
 static socket_t listen_on_port(Uint16 port) {
-    return net_listen(IPV4_LOCALHOST, port, 1);
+    return net_listen(IPV4_INADDR_ANY, port, 1);
 }
 
 static socket_t connect_and_read_byte(Uint16 port) {
@@ -152,26 +154,31 @@ void server_init(struct server *server) {
 
 SDL_bool server_start(struct server *server, const char *serial,
                       Uint16 local_port, Uint16 max_size, Uint32 bit_rate,
-                      const char *crop, SDL_bool send_frame_meta) {
+                      const char *crop, SDL_bool send_frame_meta, SDL_bool force_listen) {
     server->local_port = local_port;
+    if(force_listen) {
+        server->tunnel_forward = SDL_FALSE; // we nned to force device -> client communications
+        server->server_copied_to_device = SDL_FALSE;
+    }
+    else
+    {
+        if (serial) {
+            server->serial = SDL_strdup(serial);
+            if (!server->serial) {
+                return SDL_FALSE;
+            }
+        }
 
-    if (serial) {
-        server->serial = SDL_strdup(serial);
-        if (!server->serial) {
+        if (!push_server(serial)) {
+            SDL_free((void *) server->serial);
             return SDL_FALSE;
         }
-    }
+        server->server_copied_to_device = SDL_TRUE;
 
-    if (!push_server(serial)) {
-        SDL_free((void *) server->serial);
-        return SDL_FALSE;
-    }
-
-    server->server_copied_to_device = SDL_TRUE;
-
-    if (!enable_tunnel(server)) {
-        SDL_free((void *) server->serial);
-        return SDL_FALSE;
+        if (!enable_tunnel(server)) {
+            SDL_free((void *) server->serial);
+            return SDL_FALSE;
+        }
     }
 
     // if "adb reverse" does not work (e.g. over "adb connect"), it fallbacks to
@@ -186,24 +193,28 @@ SDL_bool server_start(struct server *server, const char *serial,
         server->server_socket = listen_on_port(local_port);
         if (server->server_socket == INVALID_SOCKET) {
             LOGE("Could not listen on port %" PRIu16, local_port);
-            disable_tunnel(server);
-            SDL_free((void *) server->serial);
+            if(!force_listen) {
+                disable_tunnel(server);
+                SDL_free((void *) server->serial);
+            }
             return SDL_FALSE;
         }
     }
 
     // server will connect to our server socket
-    server->process = execute_server(serial, max_size, bit_rate,
-                                     server->tunnel_forward, crop,
-                                     send_frame_meta);
+    if(!force_listen) {
+        server->process = execute_server(serial, max_size, bit_rate,
+                                        server->tunnel_forward, crop,
+                                        send_frame_meta);
 
-    if (server->process == PROCESS_NONE) {
-        if (!server->tunnel_forward) {
-            close_socket(&server->server_socket);
+        if (server->process == PROCESS_NONE) {
+            if (!server->tunnel_forward) {
+                close_socket(&server->server_socket);
+            }
+            disable_tunnel(server);
+            SDL_free((void *) server->serial);
+            return SDL_FALSE;
         }
-        disable_tunnel(server);
-        SDL_free((void *) server->serial);
-        return SDL_FALSE;
     }
 
     server->tunnel_enabled = SDL_TRUE;
@@ -230,17 +241,18 @@ socket_t server_connect_to(struct server *server) {
     }
 
     // the server is started, we can clean up the jar from the temporary folder
-    remove_server(server->serial); // ignore failure
-    server->server_copied_to_device = SDL_FALSE;
-
-    // we don't need the adb tunnel anymore
-    disable_tunnel(server); // ignore failure
-    server->tunnel_enabled = SDL_FALSE;
+    if(server->server_copied_to_device) {
+        remove_server(server->serial); // ignore failure
+        server->server_copied_to_device = SDL_FALSE;
+        // we don't need the adb tunnel anymore
+        disable_tunnel(server); // ignore failure
+        server->tunnel_enabled = SDL_FALSE;
+    }
 
     return server->device_socket;
 }
 
-void server_stop(struct server *server) {
+void server_stop(struct server *server) {        
     SDL_assert(server->process != PROCESS_NONE);
 
     if (!cmd_terminate(server->process)) {

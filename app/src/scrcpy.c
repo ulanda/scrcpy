@@ -140,10 +140,11 @@ static void wait_show_touches(process_t process) {
 }
 
 SDL_bool scrcpy(const struct scrcpy_options *options) {
-    SDL_bool send_frame_meta = !!options->record_filename;
+    // we are not negotianign the frame_meta delivery when listening.
+    SDL_bool send_frame_meta = (!!options->record_filename) && (options->force_listen);
     if (!server_start(&server, options->serial, options->port,
                       options->max_size, options->bit_rate, options->crop,
-                      send_frame_meta)) {
+                      send_frame_meta, options->force_listen)) {
         return SDL_FALSE;
     }
 
@@ -162,6 +163,16 @@ SDL_bool scrcpy(const struct scrcpy_options *options) {
         goto finally_destroy_server;
     }
 
+    if(options->force_listen)
+    {
+        LOGI("srccpy waitng for entry connection at followin addreses:");
+        int idx = 0;
+        const char* lAddr = net_addr_string(idx);
+        while(lAddr) {
+            LOGI("%s:%d", lAddr, server.local_port);
+            lAddr = net_addr_string(++idx);
+        }
+    }
     socket_t device_socket = server_connect_to(&server);
     if (device_socket == INVALID_SOCKET) {
         server_stop(&server);
@@ -194,7 +205,7 @@ SDL_bool scrcpy(const struct scrcpy_options *options) {
     }
 
     struct recorder *rec = NULL;
-    if (options->record_filename) {
+    if (options->record_filename && !options->force_listen) {
         if (!recorder_init(&recorder, options->record_filename, frame_size)) {
             ret = SDL_FALSE;
             server_stop(&server);
@@ -250,7 +261,9 @@ finally_destroy_controller:
 finally_stop_decoder:
     decoder_stop(&decoder);
     // stop the server before decoder_join() to wake up the decoder
-    server_stop(&server);
+    if(!options->force_listen) {
+        server_stop(&server);
+    }
     decoder_join(&decoder);
 finally_destroy_file_handler:
     file_handler_stop(&file_handler);
@@ -273,7 +286,8 @@ finally_destroy_server:
         wait_show_touches(proc_show_touches);
     }
 
-    server_destroy(&server);
-
+    if(!options->force_listen) {
+        server_destroy(&server);
+    }
     return ret;
 }
